@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+.venv
+venv/
+
+# Data & outputs
+output/
+outputs/
+media/
+images/
+*.csv
+*.xlsx
+*.json
+
+# Playwright
+.playwright/
+
+# OS
+.DS_Store
