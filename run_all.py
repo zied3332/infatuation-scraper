@@ -31,7 +31,8 @@ def main():
     ap = argparse.ArgumentParser("Run Infatuation pipeline (items + images + merge)")
     ap.add_argument("--city", required=True, help="city slug, e.g. london")
     ap.add_argument("--out-dir", default="output", help="output folder")
-    ap.add_argument("--max", type=int, default=10, help="limit number of reviews")
+    ap.add_argument("--max", type=int, default=0,
+                    help="limit number of reviews (0 = ALL reviews by pressing Load more)")
     ap.add_argument("--headed", action="store_true")
     ap.add_argument("--debug", action="store_true")
 
@@ -49,13 +50,10 @@ def main():
     ensure_dir(out_dir)
     ensure_dir(os.path.join(out_dir, city))
 
-    # IMPORTANT: items.json is a FILE, not a folder → put city folder separately
+    # items JSON (metadata scraper)
     items_json = os.path.join(out_dir, f"{city}.json")
 
-    # images script writes either:
-    #   output/<city>/items.json
-    # or (your current behavior):
-    #   output/<city>/<city>/items.json
+    # images JSON (images scraper) can end up in different paths depending on script
     images_json_expected_1 = os.path.join(out_dir, city, "items.json")
     images_json_expected_2 = os.path.join(out_dir, city, city, "items.json")
 
@@ -63,41 +61,49 @@ def main():
 
     py = sys.executable  # current python interpreter
 
-    # =========================
-    # 1) MAIN ITEMS SCRAPER
-    # supports: --city --out --max --headed --debug
-    # =========================
+    # -------------------------
+    # 1) ITEMS SCRAPER
+    # -------------------------
     cmd_items = [
         py, args.items_script,
         "--city", city,
         "--out", items_json,
-        "--max", str(args.max),
     ]
+
+    # only pass --max if user set it (>0)
+    if args.max and args.max > 0:
+        cmd_items += ["--max", str(args.max)]
+
     if args.headed:
         cmd_items.append("--headed")
     if args.debug:
         cmd_items.append("--debug")
 
-    # =========================
+    # -------------------------
     # 2) IMAGES SCRAPER
-    # supports: --city --outdir --max (no --debug in your script)
-    # =========================
+    # -------------------------
     cmd_images = [
         py, args.images_script,
         "--city", city,
         "--outdir", os.path.join(out_dir, city),
-        "--max", str(args.max),
     ]
 
-    # =========================
-    # Run steps 1 & 2 first
-    # =========================
+    # only pass --max if user set it (>0)
+    if args.max and args.max > 0:
+        cmd_images += ["--max", str(args.max)]
+
+    # optional: if you want incremental runs, you can uncomment this line
+    # cmd_images.append("--incremental")
+
+    # -------------------------
+    # Run steps 1 & 2
+    # -------------------------
     run_cmd(cmd_items,  "STEP 1/3: ITEMS SCRAPER")
     run_cmd(cmd_images, "STEP 2/3: IMAGES SCRAPER")
 
-    # =========================
+    # -------------------------
     # 3) MERGE (auto-detect correct images path)
-    # =========================
+    # -------------------------
     images_json = pick_existing(images_json_expected_1, images_json_expected_2)
     if not images_json:
         print("\n[ERROR] Could not find images JSON after running images scraper.")

@@ -59,7 +59,7 @@ def is_author_headshot(url: str, alt: str = "") -> bool:
     return False
 
 
-# ✅ Skip Suggested Reading + Included In / Featured In card images
+# ✅ NEW: Skip Suggested Reading + Included In / Featured In card images
 # We detect by checking if the img has an ancestor with one of these classes.
 SKIP_IMG_ANCESTOR_CLASS_SUBSTRINGS = [
     "styles_story__",                 # suggested reading cards
@@ -132,7 +132,6 @@ def in_inclusive_range(date_iso: str, start_iso: Optional[str], end_iso: Optiona
     return True
 
 def clean_cloudinary_url(url: str) -> str:
-    # push width up if present
     return re.sub(r"w_\d+", "w_3840", url)
 
 def guess_ext_from_content_type(ct: str) -> str:
@@ -174,22 +173,11 @@ def normalize_url(u: str, page_url: str) -> str:
         return ""
     return urljoin(page_url, u)
 
-
 # -------------------------
-# 1) Collect review URLs (Playwright) - UPDATED (Load more)
+# 1) Collect review URLs (Playwright)
 # -------------------------
-
-def accept_cookies_if_present(page) -> None:
-    try:
-        page.get_by_role("button", name=re.compile(r"OK|Accept|I agree", re.I)).click(timeout=3000)
-    except Exception:
-        pass
 
 def collect_review_urls(city_slug: str, max_reviews: Optional[int] = None) -> List[str]:
-    """
-    UPDATED: click "Load more" until it disappears (or until max_reviews reached).
-    This avoids the old "scroll until stable" which misses pages.
-    """
     listing_url = f"{BASE}/{city_slug}/reviews"
     found: List[str] = []
     seen: Set[str] = set()
@@ -200,17 +188,20 @@ def collect_review_urls(city_slug: str, max_reviews: Optional[int] = None) -> Li
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
         page.goto(listing_url, wait_until="domcontentloaded", timeout=120000)
-        accept_cookies_if_present(page)
 
-        def harvest_links():
-            anchors = page.query_selector_all('a[data-testid^="detailedStory-link-"]')
-            # fallback: any anchors containing /{city}/reviews/
-            if not anchors:
-                anchors = page.query_selector_all("a[href]")
+        try:
+            page.get_by_role("button", name=re.compile(r"OK|Accept|I agree", re.I)).click(timeout=3000)
+        except Exception:
+            pass
+
+        last_count = 0
+        stable_rounds = 0
+
+        while True:
+            anchors = page.query_selector_all("a[href]")
             for a in anchors:
                 href = a.get_attribute("href") or ""
-                href = href.strip()
-                if not href:
+                if "/reviews/" not in href:
                     continue
 
                 full = urljoin(BASE, href)
@@ -221,51 +212,26 @@ def collect_review_urls(city_slug: str, max_reviews: Optional[int] = None) -> Li
                     seen.add(full)
                     found.append(full)
 
-        # first harvest
-        harvest_links()
-
-        while True:
             if max_reviews and len(found) >= max_reviews:
                 found = found[:max_reviews]
                 break
 
-            accept_cookies_if_present(page)
+            page.mouse.wheel(0, 3000)
+            page.wait_for_timeout(1200)
 
-            # try to locate the Load more button
-            # it is an <a> with text "Load more"
-            btn = page.locator('a:has-text("Load more")').first
-            if btn.count() == 0:
-                # no more pages
-                break
+            if len(found) == last_count:
+                stable_rounds += 1
+            else:
+                stable_rounds = 0
+                last_count = len(found)
 
-            prev = len(found)
-
-            # click and expect navigation (href?page=2)
-            try:
-                with page.expect_navigation(wait_until="domcontentloaded", timeout=60000):
-                    btn.click()
-            except Exception:
-                # if no navigation happened, try simple click + wait a bit
-                try:
-                    btn.click(timeout=5000)
-                except Exception:
-                    break
-                page.wait_for_timeout(1200)
-
-            accept_cookies_if_present(page)
-            page.wait_for_timeout(400)
-
-            harvest_links()
-
-            # safety: stop if click didn't add anything new
-            if len(found) == prev:
+            if stable_rounds >= 5:
                 break
 
         browser.close()
 
     print(f"[LIST] Collected {len(found)} review URLs")
     return found
-
 
 # -------------------------
 # 2) Parse one review page (Requests + BS4)
@@ -311,7 +277,7 @@ def extract_images(page_url: str, soup: BeautifulSoup) -> List[dict]:
     seen_urls: Set[str] = set()
 
     for img in soup.find_all("img"):
-        # skip images from Suggested Reading / Featured In blocks
+        # ✅ NEW: skip images from Suggested Reading / Featured In blocks
         if has_skipped_ancestor(img):
             continue
 
@@ -380,7 +346,6 @@ def scrape_review(url: str) -> dict:
         "images": extract_images(url, soup),
     }
 
-
 # -------------------------
 # 3) Download images
 # -------------------------
@@ -421,7 +386,6 @@ def download_images_for_item(city_out_dir: str, item: dict) -> None:
         else:
             im["downloaded"] = False
             im["local_path"] = None
-
 
 # -------------------------
 # main

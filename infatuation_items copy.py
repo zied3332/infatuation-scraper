@@ -4,7 +4,6 @@
 import asyncio
 import json
 import re
-import os
 import argparse
 from urllib.parse import urljoin, urlparse
 from typing import Any, Dict, List, Optional, Tuple
@@ -27,7 +26,7 @@ def city_slug_from_source_id(source_id: str) -> Optional[str]:
 
 def split_address(addr: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     addr = clean_text(addr)
-    if not addr:
+    if not addr:\
         return None, None, None
     parts = [clean_text(x) for x in addr.split(",") if clean_text(x)]
     if len(parts) >= 3:
@@ -306,82 +305,23 @@ async def accept_cookies_if_present(page, debug: bool = False):
     except Exception:
         pass
 
-async def collect_review_links_all_pages(page, base_url: str, city: str, max_links: int, debug: bool) -> List[str]:
-    """
-    Opens the listing and keeps clicking "Load more" until it disappears.
-    Collects unique review URLs from all loaded cards.
-    max_links: 0 means no limit (collect all).
-    """
-    seen = set()
-    links: List[str] = []
+async def get_review_links_from_listing(page, base_url: str, city: str, limit: int) -> List[str]:
+    await page.wait_for_selector('a[data-testid^="detailedStory-link-"]', timeout=60000)
+    anchors = await page.query_selector_all('a[data-testid^="detailedStory-link-"]')
 
-    async def harvest():
-        # wait for cards to exist
-        await page.wait_for_selector('a[data-testid^="detailedStory-link-"]', timeout=60000)
-        anchors = await page.query_selector_all('a[data-testid^="detailedStory-link-"]')
-        for a in anchors:
-            href = (await a.get_attribute("href")) or ""
-            href = href.strip()
-            if not href.startswith("/"):
-                continue
-            full = urljoin(base_url, href)
-            if f"/{city}/reviews/" not in full:
-                continue
-            if full in seen:
-                continue
-            seen.add(full)
-            links.append(full)
-            if max_links and len(links) >= max_links:
-                return True  # reached limit
-        return False
-
-    # first harvest
-    reached = await harvest()
-    if reached:
-        return links
-
-    # loop load more
-    while True:
-        await accept_cookies_if_present(page, debug=debug)
-
-        # find "Load more" (it's an <a ...> in your HTML)
-        load_more = await page.query_selector('a:has-text("Load more"), a.styles_loadMoreButton___IN38')
-        if not load_more:
-            if debug:
-                print("[LIST] no Load more button found -> done")
-            break
-
-        if debug:
-            href = await load_more.get_attribute("href")
-            print("[LIST] clicking Load more", f"(href={href})" if href else "")
-
-        # click and wait for either navigation or more cards to appear
-        prev_count = len(links)
-        try:
-            async with page.expect_navigation(wait_until="domcontentloaded", timeout=60000):
-                await load_more.click()
-        except Exception:
-            # if it didn't navigate, still click and wait for more cards
-            try:
-                await load_more.click()
-            except Exception:
-                # last resort: navigate to href
-                href = await load_more.get_attribute("href")
-                if href:
-                    await page.goto(href, wait_until="domcontentloaded")
-
-        # allow new cards to render
-        await asyncio.sleep(0.6)
-        await accept_cookies_if_present(page, debug=debug)
-
-        reached = await harvest()
-        if reached:
-            break
-
-        # if nothing new got added, stop (prevents infinite loop)
-        if len(links) == prev_count:
-            if debug:
-                print("[LIST] Load more did not add new links -> stopping")
+    links = []
+    for a in anchors:
+        href = await a.get_attribute("href")
+        if not href:
+            continue
+        href = href.strip()
+        if not href.startswith("/"):
+            continue
+        full = urljoin(base_url, href)
+        if f"/{city}/reviews/" not in full:
+            continue
+        links.append(full)
+        if len(links) >= limit:
             break
 
     return links
@@ -392,7 +332,7 @@ async def collect_review_links_all_pages(page, base_url: str, city: str, max_lin
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--city", default="london")
-    ap.add_argument("--max", type=int, default=0, help="0 = ALL results, otherwise limit N")
+    ap.add_argument("--max", type=int, default=10)
     ap.add_argument("--out", default="items.json")
     ap.add_argument("--headed", action="store_true")
     ap.add_argument("--debug", action="store_true")
@@ -401,11 +341,6 @@ async def main():
     debug = bool(args.debug)
     base = "https://www.theinfatuation.com"
     start_url = f"{base}/{args.city}/reviews"
-
-    # ensure output folder exists
-    out_dir = os.path.dirname(args.out)
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=(False if args.headed else True))
@@ -421,8 +356,8 @@ async def main():
         await page.goto(start_url, wait_until="domcontentloaded")
         await accept_cookies_if_present(page, debug=debug)
 
-        links = await collect_review_links_all_pages(page, base, args.city, args.max, debug=debug)
-        print(f"[INFO] Total review links collected: {len(links)}")
+        links = await get_review_links_from_listing(page, base, args.city, args.max)
+        print(f"[INFO] Found {len(links)} review links (limit={args.max})")
 
         items: List[Dict[str, Any]] = []
 
@@ -439,6 +374,15 @@ async def main():
 
             item = await build_item_from_review_page(page, url)
             items.append(item)
+
+            # go back to listing (your flow)
+            if idx < len(links):
+                print("  [NAV] back to listing")
+                try:
+                    await page.go_back(wait_until="domcontentloaded")
+                except Exception:
+                    await page.goto(start_url, wait_until="domcontentloaded")
+                await accept_cookies_if_present(page, debug=debug)
 
         with open(args.out, "w", encoding="utf-8") as f:
             json.dump(items, f, ensure_ascii=False, indent=2)
